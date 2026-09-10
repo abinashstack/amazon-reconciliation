@@ -1,0 +1,16 @@
+-- ============================================================================
+-- MAPPING_FIXES.sql
+--
+-- One commented block per genuine mapping defect found by comparing the
+-- independently-derived Payments and Settlements columns of the Summary sheet.
+-- Each block: what the rule was, what it was changed to, and why.
+--
+-- Fixes live in the config DATA (payment_config / settlement_config), never in
+-- Go code. Re-run with:  recon fixes sql/MAPPING_FIXES.sql && recon report out/report_after_fix.xlsx
+--
+-- NOTE: when a fix must change a *match key* (transaction_type / description /
+-- amount_type / amount_description) set BOTH the _raw and the _norm column, as
+-- ingest matches on the pre-normalised _norm values.
+--
+-- >>> Populated after the first before-fix run. <<<
+-- ============================================================================

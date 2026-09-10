@@ -1,0 +1,5 @@
+/recon
+/recon.exe
+/bin/
+*.log
+.env
