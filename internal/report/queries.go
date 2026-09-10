@@ -11,8 +11,39 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ScopedSummarySQL derives the two Summary columns over the reconciliation
+// scope: the settlement(s) present in the settlement file, Released payments
+// only. Each column is summed purely from its own source's amount_entry rows.
+// This is a shared query so `report` and `mismatches` agree.
+const ScopedSummarySQL = `
+with scope_settlements as (
+    select distinct raw->>'settlement-id' as sid
+    from source_row
+    where source_file = 'settlements' and row_kind = 'settlement_header'
+),
+pay as (
+    select ae.summary_field as field, sum(ae.amount) as amt
+    from amount_entry ae
+    join source_row sr on sr.id = ae.source_row_id
+    where ae.source_file = 'payments'
+      and sr.raw->>'Transaction status' = 'Released'
+      and ae.settlement_id in (select sid from scope_settlements)
+      and ae.summary_field <> ''
+    group by 1
+),
+setl as (
+    select ae.summary_field as field, sum(ae.amount) as amt
+    from amount_entry ae
+    where ae.source_file = 'settlements' and ae.summary_field <> ''
+    group by 1
+)
+select 'payments'::text as src, field, amt from pay
+union all
+select 'settlements'::text as src, field, amt from setl
+`
+
 func loadSummaryTotals(ctx context.Context, pool *pgxpool.Pool) (map[[2]string]float64, error) {
-	rows, err := pool.Query(ctx, `select source_file, summary_field, amount from summary_total`)
+	rows, err := pool.Query(ctx, ScopedSummarySQL)
 	if err != nil {
 		return nil, err
 	}

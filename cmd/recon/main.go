@@ -102,18 +102,21 @@ func applyFixes(ctx context.Context, pool *pgxpool.Pool, path string) {
 // and Settlements columns disagree - the driver for MAPPING_FIXES.sql.
 func printMismatches(ctx context.Context, pool *pgxpool.Pool) {
 	rows, err := pool.Query(ctx, `
-		with u as (
-			select coalesce(p.summary_field, s.summary_field) as field,
-			       coalesce(p.amount,0) as pay, coalesce(s.amount,0) as setl
-			from (select * from summary_total where source_file='payments') p
-			full join (select * from summary_total where source_file='settlements') s
-			  on p.summary_field = s.summary_field
+		with scoped as (`+report.ScopedSummarySQL+`),
+		agg as (
+		  select field,
+		         sum(amt) filter (where src = 'payments')    as pay,
+		         sum(amt) filter (where src = 'settlements')  as setl
+		  from scoped
+		  group by field
 		)
-		select u.field, coalesce(l.section,'?'), coalesce(l.line_label,u.field),
-		       u.pay, u.setl, round((u.pay-u.setl)::numeric,2) as diff
-		from u left join summary_layout l on l.summary_field = u.field
-		where round((u.pay-u.setl)::numeric,2) <> 0
-		order by 2,3`)
+		select a.field, coalesce(l.section,'?'), coalesce(l.line_label, a.field),
+		       coalesce(a.pay,0), coalesce(a.setl,0),
+		       round((coalesce(a.pay,0) - coalesce(a.setl,0))::numeric, 2) as diff
+		from agg a
+		left join summary_layout l on l.summary_field = a.field
+		where round((coalesce(a.pay,0) - coalesce(a.setl,0))::numeric, 2) <> 0
+		order by 2, 3`)
 	must(err)
 	defer rows.Close()
 	n := 0
