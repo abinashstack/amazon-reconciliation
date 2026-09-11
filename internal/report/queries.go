@@ -81,6 +81,49 @@ func loadRecon(ctx context.Context, pool *pgxpool.Pool) ([]reconRow, []string, e
 		lr.Close()
 	}
 
+	// raw total per (record_ref, source_file), over ALL amount_entry rows -
+	// including summary_field='' ones. The bucket columns below only ever show
+	// summarised amounts; a record whose entries are all unsummarised (e.g. a
+	// bank-disbursement Transfer row) would otherwise render as all-zero with
+	// no visible number even though real money moved. This closes that gap.
+	//
+	// A payments row's `total` column is a control total that repeats the sum
+	// of its own other amount columns (that's why every payment_config rule on
+	// amount_field='total' is empty-routed for real transaction types) - so it
+	// is excluded here whenever the same record_ref also has a non-'total'
+	// payment entry, to avoid silently doubling the visible figure. When
+	// `total` is the ONLY entry for a record (no components at all), it is
+	// kept - it's the only representation of the money.
+	rawTotals := map[[2]string]float64{}
+	{
+		rt, err := pool.Query(ctx, `
+			with flagged as (
+				select record_ref, source_file, amount_field, amount,
+				       bool_or(amount_field <> 'total') over (partition by record_ref, source_file) as has_component
+				from amount_entry
+			)
+			select record_ref, source_file, sum(amount)
+			from flagged
+			where source_file <> 'payments' or amount_field <> 'total' or not has_component
+			group by record_ref, source_file`)
+		if err != nil {
+			return nil, nil, err
+		}
+		for rt.Next() {
+			var ref, sf string
+			var amt float64
+			if err := rt.Scan(&ref, &sf, &amt); err != nil {
+				rt.Close()
+				return nil, nil, err
+			}
+			rawTotals[[2]string{ref, sf}] = amt
+		}
+		rt.Close()
+		if err := rt.Err(); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	rows, err := pool.Query(ctx, `
 		select record_ref, status,
 		       coalesce(transaction_type,''), coalesce(description,''), coalesce(sku,''),
@@ -113,6 +156,8 @@ func loadRecon(ctx context.Context, pool *pgxpool.Pool) ([]reconRow, []string, e
 		}
 		rr.payRowIDs = joinIDs(pids)
 		rr.setRowIDs = joinIDs(sids)
+		rr.payRawTotal = rawTotals[[2]string{rr.recordRef, "payments"}]
+		rr.setRawTotal = rawTotals[[2]string{rr.recordRef, "settlements"}]
 		out = append(out, rr)
 	}
 	if err := rows.Err(); err != nil {

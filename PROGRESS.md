@@ -74,3 +74,37 @@ Traced (all in `sql/MAPPING_FIXES.sql`):
   is not settlement-specific; more settlements would just widen the scope.
 - `total_refund_expense_or_sales_amt` and the other holding-bucket slugs have no
   Summary line and net to zero here; left as `Unsummarised`.
+
+## 2026-09-11 (later) — audit pass, prompted by "check the 2 unreconciled entries"
+
+- Independently re-verified the after-fix Summary with a standalone SQL query
+  bypassing the Go report code - matches the workbook exactly. Checked for
+  silently-dropped `summary_field` values (none) and non-zero amounts hiding in
+  the `Unsummarised` holding buckets within scope (none).
+- User asked me to check the 2 `unreconciled_payment` entries that carry no
+  Summary bucket (both legitimately unsummarised - the bank-disbursement
+  `Transfer` rows). Checking them surfaced a real Consolidated Data defect:
+  each Transfer row's `other` and `total` columns (same underlying amount)
+  resolved to two *different* `record_ref`s, so one real transaction rendered
+  as two Consolidated Data rows, both all-zero in every bucket column - money
+  invisible except by following the row-id trace-back. Confirmed isolated to
+  exactly the 2 Transfer rows in the whole dataset (`amount_entry` grouped by
+  `source_row_id having count(distinct record_ref) > 1`); no `reconciled`
+  record affected, no Summary impact (both entries were already unsummarised).
+- Fix (Defect 5, `sql/MAPPING_FIXES.sql`): added the missing TRANSFER-specific
+  rule for the `other` column so both columns resolve to the same key. The two
+  rows collapsed to one each (`unreconciled_payment` 9389 → 9387); Summary
+  still reconciles to 0.
+- Added "raw total (all entries, incl. unsummarised)" columns to Consolidated
+  Data (both sides) so an unsummarised record is never an invisible all-zero
+  row again, generally. First attempt double-counted every ordinary reconciled
+  order (summed the redundant `total` entry on top of its own components) -
+  caught by checking a normal order's raw total against its bucket total before
+  shipping it, not just the 2 known rows. Fixed: a payments row's `total` is
+  excluded from the raw-total sum whenever the same record has a non-`total`
+  entry (it's a control total, always redundant with components on this file);
+  kept when `total` is the only entry. Re-verified against both a Transfer row
+  (raw total = real amount, not 2x) and a normal order (raw total = net of
+  components, not inflated).
+- Regenerated `out/report_before_fix.xlsx`, `out/report_after_fix.xlsx`,
+  `out/pg_dump_after_ingest.dump` from a clean drop/recreate of `recon`.

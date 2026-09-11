@@ -141,6 +141,8 @@ type reconRow struct {
 	settlementID string
 	payBuckets   map[string]float64
 	setBuckets   map[string]float64
+	payRawTotal  float64 // all amount_entry rows for this record, summarised or not
+	setRawTotal  float64
 	payRowIDs    string
 	setRowIDs    string
 }
@@ -150,7 +152,8 @@ func writeConsolidated(f *excelize.File, recs []reconRow, buckets []string) erro
 	f.NewSheet(s)
 
 	head := []string{"record_ref", "reconciliation status", "transaction type", "description / amount type",
-		"sku", "date", "settlement id"}
+		"sku", "date", "settlement id",
+		"P: raw total (all entries, incl. unsummarised)", "S: raw total (all entries, incl. unsummarised)"}
 	for _, b := range buckets {
 		head = append(head, "P: "+b)
 	}
@@ -185,6 +188,8 @@ func writeConsolidated(f *excelize.File, recs []reconRow, buckets []string) erro
 		put(rec.sku)
 		put(rec.date)
 		put(rec.settlementID)
+		put(round2(rec.payRawTotal))
+		put(round2(rec.setRawTotal))
 		for _, b := range buckets {
 			put(round2(rec.payBuckets[b]))
 		}

@@ -69,8 +69,10 @@ pg_dump --no-owner --no-privileges -Fc "$RECON_DSN" -f out/pg_dump_after_ingest.
 ## Results
 
 Reconciliation scope = settlement `12395580393` (the only settlement in the file),
-Released payments. `reconciled = 13289`, `unreconciled_payment = 9389`
-(other settlements + deferred), `unreconciled_settlement = 0`.
+Released payments. Before fix: `reconciled = 13289`, `unreconciled_payment = 9389`
+(other settlements + deferred), `unreconciled_settlement = 0`. After fix,
+`unreconciled_payment = 9387` (Defect 5 below collapses two fragmented rows into
+one each; the Summary total is unaffected either way, see below).
 
 ### Before fix — Summary mismatches
 | section | line | Payments | Settlements | diff |
@@ -83,8 +85,16 @@ Released payments. `reconciled = 13289`, `unreconciled_payment = 9389`
 
 ### After `sql/MAPPING_FIXES.sql` — `recon mismatches` → *no mismatches*
 
-Four config defects (see `sql/MAPPING_FIXES.sql` for the traced records and the
-exact statements):
+Re-verified independently: re-ran the Summary aggregation as a standalone SQL
+query (bypassing the Go report code) and it matches the workbook line for line.
+Also checked for silent drops - no `summary_field` value produced by
+`amount_entry` is missing from `summary_layout`, and every "Unsummarised"
+holding-bucket slug nets to zero within scope - so "no mismatches" isn't hiding
+anything outside the 21 Summary lines either.
+
+Five config defects (see `sql/MAPPING_FIXES.sql` for the traced records and the
+exact statements). The first four fix the Summary sheet; the fifth is a
+Consolidated Data-only data-quality fix with no Summary impact:
 
 1. **Bank disbursement booked as an Amazon fee** (-133,756.51). The
    `Transfer` / "To account ending with: 334" payout row doesn't match
@@ -105,6 +115,29 @@ exact statements):
    The payment side treats refunded facilitator tax as pass-through; the
    settlement side books it to `refunded_expenses`. Fix: make the settlement
    refund-tax rules pass-through too.
+5. **One transaction renders as two Consolidated Data rows.** The two bank-
+   disbursement `Transfer` rows in the whole payments file have only `other` and
+   `total` populated (same figure); `other` has no TRANSFER-specific rule so it
+   falls to the generic catch-all, whose order-keyed template can't resolve
+   (no order id on a transfer) and produces a synthetic key different from the
+   one Defect 1 gives `total` - one transaction, two rows, both showing an
+   all-zero bucket columns (neither is summarised). Found by spot-checking the
+   two `unreconciled_payment` rows this produced; confirmed via
+   `array_agg(distinct record_ref) ... having count(distinct record_ref) > 1`
+   that it's isolated to exactly these two transactions in the whole dataset.
+   Fix: add the matching TRANSFER rule for `other` so both columns resolve to
+   the same key and collapse into one row.
+
+Also added two **raw total (all entries, incl. unsummarised)** columns to
+Consolidated Data (`internal/report/report.go`) so an unsummarised record never
+renders as an all-zero row with the real amount invisible except by following
+the row-id trace-back - closes the gap Defect 5 surfaced, generally rather than
+only for these two rows. A payments row's `total` column is a redundant control
+total (equal to the sum of its own other columns) whenever those other columns
+exist, so it's excluded from that sum in that case, to avoid silently doubling
+the figure - verified against both a Transfer row (raw total = the real
+-97,919.76 / -133,756.51, not 2x) and an ordinary reconciled order (raw total =
+net of all components, not inflated by the redundant `total` entry).
 
 ---
 

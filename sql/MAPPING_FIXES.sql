@@ -147,4 +147,39 @@ update settlement_config set summary_pos = '', summary_neg = ''
  where file_line_no = 12 and transaction_type_raw = 'REFUND' and amount_type_raw = 'ITEMPRICE'
    and amount_description_raw = 'GIFTWRAPTAX';
 
+-- ---------------------------------------------------------------------------
+-- DEFECT 5  -  one real transaction renders as two Consolidated Data rows
+--             (Consolidated Data only - no Summary-sheet impact; both entries
+--              already route to '' so neither line 1 nor line 2 above changes)
+--
+-- The two Transfer/bank-payout rows in the whole payments file (settlement
+-- 12395580393: -133756.51; settlement 12382593803: -97919.76) have only their
+-- `other` and `total` amount columns populated, both carrying the same figure.
+-- `other` has no rule of its own for TRANSFER, so it falls to the empty-
+-- transaction_type catch-all L111 (`,any,other -> ''`), whose record_ref
+-- template `txn_ref+settlement_id+date` can't resolve (txn_ref/order id is
+-- empty for a Transfer) and falls back to a synthetic NOKEY key - a DIFFERENT
+-- key than the `total` column gets from the DEFECT-1 fix
+-- (`TRANSFER+description+settlement_id+date`). One transaction, two record_refs,
+-- two Consolidated Data rows, each showing the same real dollar amount once
+-- traced back - confusing for an auditor even though no money is double-counted
+-- in any bucket (both entries are unsummarised).
+--
+-- WAS : no payment_config rule for TRANSFER/other -> falls through to the
+--       generic catch-all's order-keyed template.
+-- NOW : add the same TRANSFER-specific rule for `other` that DEFECT 1 gave
+--       `total`, so both amount columns of the same row resolve to the SAME
+--       record_ref and collapse into one Consolidated Data row. Exact-
+--       description transfer rules (TRANSFER/MICRO_DEPOSIT/other, L61) still
+--       win by match precedence, so this only catches the generic disbursement.
+-- ---------------------------------------------------------------------------
+insert into payment_config
+  (file_line_no, transaction_type_raw, transaction_type_norm,
+   description_raw, description_norm, is_desc_wildcard,
+   amount_field, record_ref_template, summary_pos, summary_neg, raw)
+values
+  (9999, 'TRANSFER', 'TRANSFER', 'any', 'ANY', true,
+   'other', 'TRANSFER+description+settlement_id+date', '', '',
+   '{"note":"MAPPING_FIXES.sql defect 5 - collapses the other/total split for generic transfers"}'::jsonb);
+
 commit;
