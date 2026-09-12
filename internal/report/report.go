@@ -132,19 +132,21 @@ func cell(col string, row int) string { return fmt.Sprintf("%s%d", col, row) }
 // --- Consolidated Data sheet ---
 
 type reconRow struct {
-	recordRef    string
-	status       string
-	txnType      string
-	description  string
-	sku          string
-	date         string
-	settlementID string
-	payBuckets   map[string]float64
-	setBuckets   map[string]float64
-	payRawTotal  float64 // all amount_entry rows for this record, summarised or not
-	setRawTotal  float64
-	payRowIDs    string
-	setRowIDs    string
+	recordRef        string
+	status           string
+	txnType          string
+	description      string
+	sku              string
+	date             string
+	settlementID     string
+	paymentTxnStatus string // the payments file's Transaction status (Released/Deferred); '' when no payment side
+	inSummaryScope   bool   // reproduces the Summary sheet's scope filter row-by-row - see README Assumption 2
+	payBuckets       map[string]float64
+	setBuckets       map[string]float64
+	payRawTotal      float64 // all amount_entry rows for this record, summarised or not
+	setRawTotal      float64
+	payRowIDs        string
+	setRowIDs        string
 }
 
 func writeConsolidated(f *excelize.File, recs []reconRow, buckets []string) error {
@@ -153,6 +155,7 @@ func writeConsolidated(f *excelize.File, recs []reconRow, buckets []string) erro
 
 	head := []string{"record_ref", "reconciliation status", "transaction type", "description / amount type",
 		"sku", "date", "settlement id",
+		"payment transaction status", "in Summary sheet scope",
 		"P: raw total (all entries, incl. unsummarised)", "S: raw total (all entries, incl. unsummarised)"}
 	for _, b := range buckets {
 		head = append(head, "P: "+b)
@@ -188,6 +191,8 @@ func writeConsolidated(f *excelize.File, recs []reconRow, buckets []string) erro
 		put(rec.sku)
 		put(rec.date)
 		put(rec.settlementID)
+		put(rec.paymentTxnStatus)
+		put(rec.inSummaryScope)
 		put(round2(rec.payRawTotal))
 		put(round2(rec.setRawTotal))
 		for _, b := range buckets {

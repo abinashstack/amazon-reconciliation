@@ -231,3 +231,48 @@ clean, and a full clean pipeline re-run (`all` -> `mismatches` -> `fixes` ->
 `report` -> `mismatches`) produced byte-identical results to before the
 refactor (162,919 `amount_entry`, same 5 before-fix mismatches, same
 9387/13289/0 and "no mismatches" after).
+
+## 2026-09-12 (yet later) — auditability: can every number really be traced?
+
+Prompted (combined with a repeat structure check) specifically: can any number
+in the report be traced back to source rows? The row-id trace-back mechanism
+itself was already verified complete in the reconciliation-logic audit. This
+pass asked a sharper question: can a reader reproduce the Summary sheet's
+*scope* filter (Released payments + the settlement in the file) from the
+report alone, not just trace an individual number?
+
+- **Found a real gap**: summing the whole (unfiltered) `P: sales_product_charges`
+  column in Consolidated Data gives 607,360.68, not the Summary sheet's
+  348,815.93 - and there was no "Released/Deferred" column anywhere in the
+  report to explain the difference or let a reader filter it out.
+  `settlement_id` alone wasn't enough either (filtering by settlement without
+  also filtering by status still over-counts). The scope rule lived only in
+  `report.ScopedSummarySQL`'s SQL text, invisible to anyone reading the
+  workbook.
+- **Fixed**: `reconcile.Run` now computes `payment_txn_status` (the payments
+  file's Transaction status) and `in_summary_scope` (Released AND
+  settlement-in-file) once per `record_ref`, stored on `recon_record`. Both
+  are written to Consolidated Data as new columns ("payment transaction
+  status", "in Summary sheet scope"). Verified end-to-end, from the actual
+  generated `.xlsx` file (not the database): filtering Consolidated Data to
+  `in Summary sheet scope = TRUE` and summing `P: sales_product_charges`
+  reproduces 348,815.93 exactly, using nothing but the spreadsheet.
+- **Also improved the report/reconcile boundary** (ties back into the
+  structure question asked in the same message): `report.ScopedSummarySQL`
+  previously re-derived the scope directly from `amount_entry`/`source_row`
+  (reaching into `source_row.raw->>'Transaction status'` and
+  `row_kind='settlement_header'` - implementation details of `ingest`'s raw
+  storage). It now just reads `recon_record.in_summary_scope`/
+  `payments_buckets`, so the scope rule is expressed exactly once (in
+  `reconcile`), and `report` no longer needs to know anything about how
+  `ingest` stores raw payloads. Verified the switch is a pure refactor: summed
+  `recon_record.settlements_buckets` unconditionally across all rows and
+  `payments_buckets` where `in_summary_scope`, and both matched a direct
+  `amount_entry` aggregate to the cent, before wiring `report` to use it.
+- Schema change: `recon_record` gains `payment_txn_status text` and
+  `in_summary_scope boolean not null default false` (amended `001_schema.sql`
+  directly - no production data/deployment history to preserve across
+  migrations in this project).
+- Verified zero numeric regression throughout: full clean pipeline re-run
+  gives the same 162,919 `amount_entry`, same 5 before-fix mismatches, same
+  9387/13289/0 and "no mismatches" after.

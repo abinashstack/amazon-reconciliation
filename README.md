@@ -230,8 +230,10 @@ no corresponding sample line (`total_refund_expense_or_sales_amt`,
 One row per `record_ref`: `status`
 (`reconciled` / `unreconciled_payment` / `unreconciled_settlement`),
 `payments_buckets` and `settlements_buckets` (jsonb `{summary_field: amount}`),
-and `payments_row_ids` / `settlements_row_ids` arrays carrying the trace-back
-into the Consolidated sheet.
+`payments_row_ids` / `settlements_row_ids` arrays carrying the trace-back into
+the Consolidated sheet, and `payment_txn_status` / `in_summary_scope` (see
+Assumption 2) so the Summary sheet's scope filter is itself auditable from the
+workbook, not just the database.
 
 ---
 
@@ -246,9 +248,23 @@ into the Consolidated sheet.
    settlement). Each column is still summed **purely from its own source's**
    `amount_entry` rows - the scope filter uses the settlement id and the payment
    status, never the other source's amounts or the match result. The
-   Consolidated sheet is not scoped: it lists every record, reconciled or not.
-   `summary_total` (maintained during ingest) holds the unscoped totals for both
-   files and is in the dump.
+   Consolidated sheet is **not** scoped: it lists every record, reconciled or
+   not. `summary_total` (maintained during ingest) holds the unscoped totals
+   for both files and is in the dump.
+
+   This scope is computed once, in `reconcile.Run`, and stored on every
+   `recon_record` as `in_summary_scope` (plus `payment_txn_status`, the
+   payments file's Released/Deferred flag) - `report.ScopedSummarySQL` then
+   just reads it, rather than re-deriving the rule from `amount_entry`/
+   `source_row` a second time. Both columns are also written to Consolidated
+   Data (**"payment transaction status"**, **"in Summary sheet scope"**), so a
+   reader can reproduce any Summary figure directly from the workbook: filter
+   Consolidated Data to `in Summary sheet scope = TRUE` and sum a `P:` column -
+   verified to reproduce the Summary sheet's Product Charges figure
+   (348,815.93) exactly, computed from the `.xlsx` file alone, no database
+   access. Before this column existed, that check was impossible from the
+   report itself - summing the whole (unfiltered) `P: sales_product_charges`
+   column gives 607,360.68, and there was no way to see *why* from the sheet.
 3. **Reconciliation key date = settlement/release date.** The payments file's
    `date/time` is the order's posted date; its `Transaction Release Date`
    (converted to UTC, truncated to a day) equals the settlement file's

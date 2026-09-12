@@ -160,6 +160,12 @@ create table recon_record (
     description          text,
     sku                 text,
     event_date          date,
-    settlement_id       text
+    settlement_id       text,
+    -- the two payments-side facts the Summary sheet's scope filter is built
+    -- from (README Assumption 2: Released + settlement-in-file), surfaced so
+    -- a reader of Consolidated Data can reproduce or audit that filter
+    -- without going back to the database. null when there is no payment side.
+    payment_txn_status  text,             -- the payments file's 'Transaction status' (Released/Deferred)
+    in_summary_scope    boolean not null default false
 );
 create index recon_record_status_idx on recon_record (status);

@@ -12,29 +12,26 @@ import (
 )
 
 // ScopedSummarySQL derives the two Summary columns over the reconciliation
-// scope: the settlement(s) present in the settlement file, Released payments
-// only. Each column is summed purely from its own source's amount_entry rows.
+// scope (the settlement(s) present in the settlement file, Released payments
+// only - see README Assumption 2). It reads recon_record, not amount_entry:
+// `reconcile.Run` is the single place that scope rule is expressed
+// (recon_record.in_summary_scope), and every Consolidated Data row carries
+// that same flag, so a reader can reproduce this exact total by filtering the
+// workbook instead of re-deriving the rule. The settlements side is never
+// scope-filtered - every settlement record counts, matching "the Settlements
+// column purely from ingested settlement records" even for a hypothetical
+// settlement line with no payment counterpart at all.
 // This is a shared query so `report` and `mismatches` agree.
 const ScopedSummarySQL = `
-with scope_settlements as (
-    select distinct raw->>'settlement-id' as sid
-    from source_row
-    where source_file = 'settlements' and row_kind = 'settlement_header'
-),
-pay as (
-    select ae.summary_field as field, sum(ae.amount) as amt
-    from amount_entry ae
-    join source_row sr on sr.id = ae.source_row_id
-    where ae.source_file = 'payments'
-      and sr.raw->>'Transaction status' = 'Released'
-      and ae.settlement_id in (select sid from scope_settlements)
-      and ae.summary_field <> ''
+with pay as (
+    select b.key as field, sum(b.value::numeric) as amt
+    from recon_record r, jsonb_each_text(r.payments_buckets) as b
+    where r.in_summary_scope
     group by 1
 ),
 setl as (
-    select ae.summary_field as field, sum(ae.amount) as amt
-    from amount_entry ae
-    where ae.source_file = 'settlements' and ae.summary_field <> ''
+    select b.key as field, sum(b.value::numeric) as amt
+    from recon_record r, jsonb_each_text(r.settlements_buckets) as b
     group by 1
 )
 select 'payments'::text as src, field, amt from pay
@@ -176,6 +173,7 @@ func loadRecon(ctx context.Context, pool *pgxpool.Pool) ([]reconRow, []string, e
 		select record_ref, status,
 		       coalesce(transaction_type,''), coalesce(description,''), coalesce(sku,''),
 		       coalesce(to_char(event_date,'YYYY-MM-DD'),''), coalesce(settlement_id,''),
+		       coalesce(payment_txn_status,''), in_summary_scope,
 		       payments_buckets, settlements_buckets,
 		       payments_row_ids, settlements_row_ids
 		from recon_record`)
@@ -191,7 +189,8 @@ func loadRecon(ctx context.Context, pool *pgxpool.Pool) ([]reconRow, []string, e
 		var pb, sb []byte
 		var pids, sids []int64
 		if err := rows.Scan(&rr.recordRef, &rr.status, &rr.txnType, &rr.description, &rr.sku,
-			&rr.date, &rr.settlementID, &pb, &sb, &pids, &sids); err != nil {
+			&rr.date, &rr.settlementID, &rr.paymentTxnStatus, &rr.inSummaryScope,
+			&pb, &sb, &pids, &sids); err != nil {
 			return nil, nil, err
 		}
 		rr.payBuckets = mustJSONMap(pb)

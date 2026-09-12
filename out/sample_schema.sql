@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict eO5vs2LpPee7aD89sC0KD0H1bkDqP6VpmhGUIqpKBWCxvzzg346iFACUwstutFg
+\restrict fmNtcKEtKmDVwZn3WFEcKk6WSdxDKzQNGpdNpvbInQwEd5Rdwn8OD4rq69ulqle
 
 -- Dumped from database version 17.11
 -- Dumped by pg_dump version 17.11
@@ -131,7 +131,9 @@ CREATE TABLE public.recon_record (
     description text,
     sku text,
     event_date date,
-    settlement_id text
+    settlement_id text,
+    payment_txn_status text,
+    in_summary_scope boolean DEFAULT false NOT NULL
 );
 
 
@@ -351,5 +353,5 @@ ALTER TABLE ONLY public.source_row
 -- PostgreSQL database dump complete
 --
 
-\unrestrict eO5vs2LpPee7aD89sC0KD0H1bkDqP6VpmhGUIqpKBWCxvzzg346iFACUwstutFg
+\unrestrict fmNtcKEtKmDVwZn3WFEcKk6WSdxDKzQNGpdNpvbInQwEd5Rdwn8OD4rq69ulqle
 
