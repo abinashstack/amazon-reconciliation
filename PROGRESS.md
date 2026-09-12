@@ -143,3 +143,45 @@ Traced (all in `sql/MAPPING_FIXES.sql`):
 - `go test ./...`, `go vet ./...`, `gofmt -l .` all clean. Regenerated
   `out/report_before_fix.xlsx`, `out/report_after_fix.xlsx`,
   `out/pg_dump_after_ingest.dump` from a clean drop/recreate.
+
+## 2026-09-12 (later) — reconciliation logic + granularity-mismatch audit
+
+Prompted to verify the reconciliation logic itself, specifically the
+many-to-many aggregation. All checks run against the live after-fix DB
+(`internal/reconcile/reconcile.go`'s SQL isn't Go-unit-testable, so this is
+empirical, not `go test`):
+
+- **How common is the N:M case, really?** 13,248 of 13,289 reconciled records
+  (99.7%) have >1 amount_entry on BOTH sides sharing one record_ref - the
+  granularity mismatch is the dominant case in this data, not an edge case.
+- **Hand-verified one real N:M record** (order `249-0001574-.../BDCEM030SAFR1A_AU`):
+  1 payment row's 5 real amount columns vs. 6 settlement lines from 6 distinct
+  source rows both collapse to the identical bucket map
+  `{sales_shipping: 1.43, expenses_amazon_fees: -11.61, sales_product_charges:
+  32.24, expenses_promotional_rebates: -4.65}`, with correct row-id sets on
+  both sides ({10441} vs {30618..30623}).
+- **Checked this at scale, not just one example**: across all 13,289 reconciled
+  records, exploded to (record_ref, bucket) = 33,371 line items. Every single
+  one ties to exactly 0.00, AND the *gross* diff (sum of `abs(P-S)`) is also
+  0.00 - not just net. This rules out the failure mode where individual
+  records don't tie but happen to cancel out in aggregate; the Summary sheet
+  reconciling to zero isn't hiding any offsetting errors underneath it.
+- **Trace-back completeness**: every distinct `source_row_id` that produced an
+  `amount_entry` (22,964 payments, 54,979 settlements) appears in exactly one
+  `recon_record.*_row_ids` array on its side - no source row missing, none
+  double-attributed to two different record_refs.
+- **`unreconciled_settlement` is never hit by real data** (0 in this dataset,
+  since the settlement file's every line found a payment match) - same
+  "never fires" caveat as the record_ref tokens found last session. Rather
+  than assume correctness by symmetry with the well-exercised payment-only
+  path, fabricated one settlement-only `amount_entry` inside a transaction,
+  ran the literal `reconcile.go` SQL against it, confirmed the row classifies
+  as `unreconciled_settlement` with an empty `payments_buckets`/`payments_row_ids`
+  and correct settlement-sourced `transaction_type`/`sku`/`event_date`/
+  `settlement_id`, then rolled the transaction back (confirmed real data
+  unchanged afterward: same 13289/9387/0 counts). No bug found; the branch
+  works as designed. (One test-fixture slip on my part, not a system bug: I
+  forgot to set `description_literal` on the fabricated row, so that one
+  field came back blank in the test - unrelated to the real ingesters, which
+  always populate it.)
+- No code changes this round - purely verification. No re-ingest needed.
