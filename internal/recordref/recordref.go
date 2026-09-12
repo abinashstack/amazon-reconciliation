@@ -74,7 +74,7 @@ func Build(template string, f Fields) (ref string, ok bool) {
 		case "shipment_id":
 			v = f.ShipmentID
 		case "record_type":
-			v = f.RecordType
+			v = strings.ToUpper(strings.TrimSpace(f.RecordType))
 		}
 		if strings.TrimSpace(v) == "" {
 			return "", false

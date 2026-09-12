@@ -49,6 +49,30 @@ go run ./cmd/recon mismatches                     # expect: "no mismatches"
 `fixes` does **not** re-run `loadconfigs`, so the SQL edits to the config tables
 persist across the re-ingest.
 
+### Unit tests
+```bash
+go test ./...
+```
+No database needed - these exercise the three config-driven ingestion
+mechanisms directly:
+- `internal/recordref` - `record_ref` template construction: every token
+  (`txn_ref`, `sku`, `settlement_id`, `date`, `description`, `merchant_order_id`,
+  `shipment_id`, `record_type`), literal segments, a repeated token, and the
+  empty-substitution → no-key fallback. Three of those tokens
+  (`merchant_order_id`, `shipment_id`, `record_type`) never actually fire
+  against the supplied data (checked via `matched_config_id` join counts), so
+  this is the only place they're verified at all - and it caught a real bug:
+  `record_type` wasn't upper-cased like every other literal/substitution,
+  fixed in `internal/recordref/recordref.go` (no numeric effect here since
+  that template path is unused in this dataset; re-confirmed by re-running the
+  full pipeline before/after - identical `amount_entry` count and mismatches).
+- `internal/ingest` - `MatchPayment`/`MatchSettlement` wildcard precedence
+  (exact type+desc > exact type+wildcard > catch-all+exact > catch-all+wildcard;
+  `amount_field`/`amount_type` never wildcarded; tie-break by `file_line_no`,
+  independent of slice order - reproduces the real duplicate-rule defect) and
+  `summaryFor` sign-based routing (positive/negative/zero, asymmetric
+  pos≠neg buckets, both-blank stays unsummarised regardless of sign).
+
 ### PostgreSQL dump
 ```bash
 pg_dump --no-owner --no-privileges -Fc "$RECON_DSN" -f out/pg_dump_after_ingest.dump
@@ -243,8 +267,16 @@ into the Consolidated sheet.
    *before* matching, because one payment row can face many settlement lines and
    vice-versa.
 7. **Amounts** keep their sign from the source. The positive/negative summary
-   bucket is chosen by the sign of the individual amount.
-8. **Zero payment amount slots** produce no `amount_entry`.
+   bucket is chosen by the sign of the individual amount; a zero amount routes
+   to the *positive* bucket by convention (`internal/ingest/config.go:summaryFor`)
+   - inconsequential for every total (adding zero is a no-op either way) but
+     worth stating since the config schema only names "positive"/"negative".
+8. **Zero payment amount slots** produce no `amount_entry` (payments are wide -
+   most of a row's ~11 amount columns are 0 and carry no information). Settlement
+   lines are kept even when `amount=0` (47 in this dataset) because each is
+   already a distinct, real reported line, not a filled-in wide column - this is
+   a deliberate asymmetry between the two ingesters, not an oversight, and has
+   no numeric effect (summing zero changes nothing).
 9. Currency is AUD throughout (payments file states it; settlement header
    confirms it).
 

@@ -108,3 +108,38 @@ Traced (all in `sql/MAPPING_FIXES.sql`):
   components, not inflated).
 - Regenerated `out/report_before_fix.xlsx`, `out/report_after_fix.xlsx`,
   `out/pg_dump_after_ingest.dump` from a clean drop/recreate of `recon`.
+
+## 2026-09-12 — unit tests for record_ref / wildcard / sign-routing correctness
+
+- Prompted to verify correctness of config-driven ingestion specifically:
+  record_ref construction, wildcard handling, sign-based summary routing.
+  Checked empirically first (real DB queries) before writing anything: the
+  `merchant_order_id`, `shipment_id`, and `record_type` record_ref tokens never
+  fire against the supplied data (0 matches each, confirmed via
+  `matched_config_id` join counts) - so nothing in the actual run exercises
+  those code paths. Wrote real unit tests instead of asserting "looks fine".
+- `internal/recordref/recordref_test.go`: covers every token, literal
+  handling, the repeated-token template (settlement_config L138), and the
+  empty-substitution → no-key fallback. Caught a real bug: `record_type` was
+  the only token not upper-cased like every other literal/substitution
+  (`internal/recordref/recordref.go`). Fixed. No numeric effect on this
+  dataset (the template using it never matches a real row) - confirmed by
+  re-running the full pipeline before/after: identical 162,919 `amount_entry`
+  rows, identical before-fix mismatches, identical after-fix result.
+- `internal/ingest/config_test.go`: `MatchPayment`/`MatchSettlement` precedence
+  (all 4 tiers, `amount_field`/`amount_type` never wildcarded, tie-break by
+  `file_line_no` independent of slice order - reproduces the real
+  `low_value_goods` duplicate-rule defect as a regression test) and
+  `summaryFor` sign routing (positive/negative/zero, asymmetric pos≠neg
+  buckets, both-blank stays unsummarised). Also confirmed via query: no
+  `settlement_config` row has an empty `amount_type` and no `payment_config`
+  row has an empty `amount_field` in this file, so the matcher's support for
+  those (tested synthetically) is unexercised by real data too; and no other
+  exact-duplicate config keys remain beyond the two already fixed.
+- Found and documented (not a bug, but worth stating): settlement lines with a
+  genuine `amount=0` (47 in this dataset) still get an `amount_entry`, unlike
+  zero-valued payment amount columns which are skipped - deliberate asymmetry,
+  README Assumption 8, no numeric effect.
+- `go test ./...`, `go vet ./...`, `gofmt -l .` all clean. Regenerated
+  `out/report_before_fix.xlsx`, `out/report_after_fix.xlsx`,
+  `out/pg_dump_after_ingest.dump` from a clean drop/recreate.
