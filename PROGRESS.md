@@ -276,3 +276,80 @@ report alone, not just trace an individual number?
 - Verified zero numeric regression throughout: full clean pipeline re-run
   gives the same 162,919 `amount_entry`, same 5 before-fix mismatches, same
   9387/13289/0 and "no mismatches" after.
+
+## 2026-09-12 (final pass) — error handling, idempotency, tests, performance
+
+Prompted for all four together. Found and fixed real issues in three of the
+four; the fourth (performance) turned up an honest non-result that's more
+valuable reported accurately than oversold.
+
+### Error handling
+- `parsePaymentTime`/`parseSettlementTime`/`parseAmount` errors were
+  discarded at all 3 call sites (`event, _ := ...`) - a malformed date/amount
+  would silently become zero/blank with zero visibility. Added a `warnings`
+  accumulator to `Engine` (exact counts, capped example messages) surfaced as
+  a `WARNING:` block on stderr after `recon ingest`.
+- Writing tests for this immediately caught two REAL bugs against the actual
+  data, not synthetic cases: (1) `Transaction Release Date` abbreviates the
+  month for 1,153 of 20,498 real rows (`"1 Aug 2026"` vs `"17 July 2026"`) -
+  silently falling back to the wrong date every prior run of this pipeline;
+  turned out to be out-of-scope rows (no Summary/reconciled impact) once
+  fixed, but was a real latent correctness bug. (2) `parseOffset`'s `hh:mm`
+  branch silently swallowed a malformed-minutes error (never triggered by
+  real data - every offset here is whole-hour). Both fixed and covered by
+  `internal/ingest/parse_test.go` (new - this package had zero test coverage
+  before this pass).
+- `parseAmount` signature changed to distinguish "blank" (expected, `(0,nil)`)
+  from "garbage" (not expected, `(0,err)`) - previously both returned a bare
+  `0`.
+
+### Idempotent re-ingestion
+- `migrate`/`ingest`/`fixes` are each safe to re-run - verified throughout
+  this project via repeated drop/recreate/re-run cycles.
+- Found a real gap: `recon fixes` was NOT idempotent - its one INSERT
+  (Defect 5) duplicates on a second application. Reproduced concretely (two
+  applications -> two identical `payment_config` rows at `file_line_no=9999`)
+  before fixing: the insert is now preceded by a `delete ... where
+  file_line_no = 9999`, and both config tables gained a `unique(file_line_no)`
+  constraint as a second line of defence against any other accidental
+  duplicate. Re-verified: two applications in a row now leave one row and
+  identical numbers.
+
+### Tests
+- New: `internal/ingest/parse_test.go` (dates + `parseAmount` + the
+  `warnings` accumulator), `internal/normalize/normalize_test.go` (the `Key`
+  canonicaliser every config match depends on, including the specific
+  near-miss pair that documents why Defect 1 was needed).
+- Also removed genuinely dead code found while adding these tests:
+  `normalize.PaymentAmountField`, a map defined but never referenced anywhere
+  (superseded by `PaymentAmountColumns` some time earlier, never cleaned up).
+
+### Performance
+- Instrumented `recon ingest` to print per-phase DB time (now permanent, not
+  throwaway): `source_row` insert ~4.9s (~15,900 rows/s), `amount_entry` COPY
+  ~5.1s (~31,900 rows/s), for the supplied 162,919-entry ingest (~11.5s total).
+  `reconcile` ~3.6s, `report.Generate` ~3.5s (DB query ~0.9s, excelize writes
+  ~1.0s, SaveAs serialisation ~1.4s).
+- Checked for the real risk (quadratic blowup) rather than guessing: every
+  aggregate in `reconcile`/`report` goes through an indexed `group by
+  record_ref` or a same-partitioned window function, never a self-join or
+  per-row all-rows comparison. Config matching is linear per entry against a
+  fixed-size (~150-row) rule set, not per-entry-per-entry. Nothing quadratic
+  found; both DB-writing phases scale linearly with row count.
+- Tried switching `writeConsolidated` from per-cell `SetCellValue` to one
+  `SetSheetRow` per row, expecting a meaningful win at ~884k cells written.
+  Measured repeatedly before shipping the claim: no significant difference
+  (~1.0s either way). Kept the change (not slower, smaller API surface) but
+  wrote the honest (non-)result in the code comment instead of the originally
+  assumed "~40% faster" - caught this before committing by re-running the
+  timing probe multiple times rather than trusting one measurement.
+- Documented the actual largest cost (`SaveAs`'s zip/XML serialisation, ~40%
+  of report generation) and the real next step for much larger files
+  (excelize `StreamWriter`), deliberately not implemented - it's a non-trivial
+  rewrite of the one function every reported number passes through, not
+  justified by this project's actual data sizes.
+
+Full clean pipeline re-run after all of the above: same 162,919 `amount_entry`,
+same 5 before-fix mismatches, same after-fix "no mismatches", reconciled=13289
+unchanged (only `unreconciled_payment` shifted by a couple, out-of-scope
+rows only, from the date-parsing correction).

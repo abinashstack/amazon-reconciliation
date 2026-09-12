@@ -70,7 +70,10 @@ create table payment_config (
     record_ref_template     text not null,
     summary_pos             text not null default '',   -- to_summary_field_when_positive_amount
     summary_neg             text not null default '',   -- to_summary_field_when_negative_amount
-    raw                     jsonb not null
+    raw                     jsonb not null,
+    unique (file_line_no)   -- catches an accidental duplicate INSERT (e.g. re-applying
+                            -- a MAPPING_FIXES.sql block that adds a new rule) as a loud
+                            -- constraint violation instead of a silent duplicate rule
 );
 
 create table settlement_config (
@@ -86,7 +89,8 @@ create table settlement_config (
     record_ref_template     text not null,
     summary_pos             text not null default '',
     summary_neg             text not null default '',
-    raw                     jsonb not null
+    raw                     jsonb not null,
+    unique (file_line_no)
 );
 
 -- ---------------------------------------------------------------------------

@@ -7,10 +7,25 @@ import (
 	"time"
 )
 
+// paymentTimeLayouts are tried in order against the "body" (everything before
+// " GMT..."). The payments file is NOT internally consistent about this:
+// `date/time` always spells the month in full ("29 June 2026 5:39:32 pm"),
+// but `Transaction Release Date` mixes full ("17 July 2026...") and
+// three-letter-abbreviated month names ("1 Aug 2026...") - 1,153 of 20,498
+// release dates use the abbreviated form. Both must be tried, not just the
+// first-observed shape.
+var paymentTimeLayouts = []string{
+	"2 January 2006 3:04:05 pm",
+	"2 January 2006 3:04:05 PM",
+	"2 Jan 2006 3:04:05 pm",
+	"2 Jan 2006 3:04:05 PM",
+}
+
 // parsePaymentTime parses the payments-file timestamp format:
 //
 //	"29 June 2026 5:39:32 pm GMT+9"
 //	"17 July 2026 4:26:32 pm GMT+9"
+//	"1 Aug 2026 4:59:36 am GMT+9"
 //
 // Go's reference parser cannot read the "GMT+9" zone, so we split it off and
 // apply the offset by hand. The returned time is in UTC.
@@ -25,12 +40,15 @@ func parsePaymentTime(s string) (time.Time, error) {
 	}
 	body := strings.TrimSpace(s[:idx])
 	off := strings.TrimSpace(s[idx+4:]) // "+9", "-7", "+09:30", ""
-	t, err := time.Parse("2 January 2006 3:04:05 pm", body)
-	if err != nil {
-		// some rows use "3:04:05 PM" casing or no seconds - try fallbacks
-		if t, err = time.Parse("2 January 2006 3:04:05 PM", body); err != nil {
-			return time.Time{}, fmt.Errorf("payment time %q: %w", s, err)
+	var t time.Time
+	var err error
+	for _, layout := range paymentTimeLayouts {
+		if t, err = time.Parse(layout, body); err == nil {
+			break
 		}
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("payment time %q: unrecognised format", s)
 	}
 	loc := time.UTC
 	if off != "" {
@@ -53,16 +71,17 @@ func parseOffset(s string) (int, error) {
 	}
 	s = strings.TrimLeft(s, "+-")
 	var hh, mm int
+	var err error
 	if strings.Contains(s, ":") {
 		parts := strings.SplitN(s, ":", 2)
-		hh, _ = strconv.Atoi(parts[0])
-		mm, _ = strconv.Atoi(parts[1])
-	} else {
-		var err error
-		hh, err = strconv.Atoi(s)
-		if err != nil {
+		if hh, err = strconv.Atoi(parts[0]); err != nil {
 			return 0, fmt.Errorf("bad offset %q", s)
 		}
+		if mm, err = strconv.Atoi(parts[1]); err != nil {
+			return 0, fmt.Errorf("bad offset %q", s)
+		}
+	} else if hh, err = strconv.Atoi(s); err != nil {
+		return 0, fmt.Errorf("bad offset %q", s)
 	}
 	return sign * (hh*3600 + mm*60), nil
 }

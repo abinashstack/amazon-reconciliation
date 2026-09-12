@@ -28,11 +28,65 @@ type Engine struct {
 	srcBuf []srcRow // pending source_row inserts
 	entBuf []entRow // pending amount_entry COPY rows
 	nEnt   int64
+
+	warn warnings
+
+	// cumulative time actually spent talking to Postgres in each phase, for
+	// `recon ingest`'s performance line - see README's Performance section.
+	timeSourceInsert time.Duration // batched INSERT...RETURNING id (source_row)
+	timeEntryCopy    time.Duration // COPY (amount_entry)
 }
 
 type summ struct {
 	amount float64
 	count  int64
+}
+
+// warnings collects per-row parse problems (a bad date, a non-numeric amount)
+// that are recovered from (treated as zero/empty, same as before) rather than
+// aborting the whole ingest over one bad row - but must not go UNSEEN. Counts
+// are exact; only a bounded number of example messages is kept so a
+// pathological input file can't blow up memory.
+type warnings struct {
+	counts  map[string]int64
+	samples []string
+}
+
+const maxWarningSamples = 20
+
+func (w *warnings) add(kind, detail string) {
+	if w.counts == nil {
+		w.counts = map[string]int64{}
+	}
+	w.counts[kind]++
+	if len(w.samples) < maxWarningSamples {
+		w.samples = append(w.samples, fmt.Sprintf("%s: %s", kind, detail))
+	}
+}
+
+func (w *warnings) Total() int64 {
+	var n int64
+	for _, c := range w.counts {
+		n += c
+	}
+	return n
+}
+
+// Lines formats one line per warning kind (with its count) followed by the
+// captured example messages, for a caller to print.
+func (w *warnings) Lines() []string {
+	if w.Total() == 0 {
+		return nil
+	}
+	var out []string
+	for kind, n := range w.counts {
+		out = append(out, fmt.Sprintf("  %d x %s", n, kind))
+	}
+	out = append(out, "  examples:")
+	for _, s := range w.samples {
+		out = append(out, "    "+s)
+	}
+	return out
 }
 
 // srcRow / pendingEntry / entRow exist as three separate stages because of a
@@ -171,6 +225,7 @@ func (e *Engine) flushSource(ctx context.Context) error {
 		         values ($1,$2,$3,$4,$5,$6) returning id`,
 			e.batchID, s.file, s.lineNo, s.kind, s.rawLine, raw)
 	}
+	dbStart := time.Now()
 	br := e.pool.SendBatch(ctx, b)
 	for i := range e.srcBuf {
 		var id int64
@@ -183,6 +238,7 @@ func (e *Engine) flushSource(ctx context.Context) error {
 	if err := br.Close(); err != nil {
 		return err
 	}
+	e.timeSourceInsert += time.Since(dbStart)
 	// promote pending entries now that ids are known
 	for i := range e.srcBuf {
 		s := &e.srcBuf[i]
@@ -221,6 +277,7 @@ func (e *Engine) flushEntries(ctx context.Context) error {
 			p.recordRef, p.matchedConfigID, nz(p.configKind), p.summaryField, p.matchNote,
 		})
 	}
+	dbStart := time.Now()
 	_, err := e.pool.CopyFrom(ctx,
 		pgx.Identifier{"amount_entry"},
 		[]string{
@@ -235,6 +292,7 @@ func (e *Engine) flushEntries(ctx context.Context) error {
 		},
 		pgx.CopyFromRows(rows),
 	)
+	e.timeEntryCopy += time.Since(dbStart)
 	if err != nil {
 		return err
 	}
@@ -261,6 +319,21 @@ func (e *Engine) flushSummary(ctx context.Context) error {
 
 // EntryCount reports how many amount_entry rows were written.
 func (e *Engine) EntryCount() int64 { return e.nEnt }
+
+// WarningLines reports per-row parse problems recovered from during ingest
+// (bad dates, non-numeric amounts), formatted for a caller to print. Empty
+// when nothing went wrong - which is the case for the supplied data files.
+func (e *Engine) WarningLines() []string { return e.warn.Lines() }
+
+// WarningCount is the exact total, even beyond the capped sample.
+func (e *Engine) WarningCount() int64 { return e.warn.Total() }
+
+// Timings reports cumulative time spent in each Postgres round trip during
+// Run, so a caller can see where time actually goes on their file sizes
+// rather than guess.
+func (e *Engine) Timings() (sourceInsert, entryCopy time.Duration) {
+	return e.timeSourceInsert, e.timeEntryCopy
+}
 
 func nz(s string) any {
 	if s == "" {

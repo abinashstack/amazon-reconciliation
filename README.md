@@ -72,6 +72,18 @@ mechanisms directly:
   independent of slice order - reproduces the real duplicate-rule defect) and
   `SummaryFor` sign-based routing (positive/negative/zero, asymmetric
   pos≠neg buckets, both-blank stays unsummarised regardless of sign).
+- `internal/normalize` - `Key`, the canonicalisation every config match
+  depends on: the package-doc examples, collapsing runs of separators to one
+  `_`, trimming, and (deliberately) the one real near-miss pair that does
+  *not* collapse to the same key (`"To account ending with: 334"` vs the
+  config's `TO_ACCOUNT_ENDING`) - documents why Defect 1 was needed instead of
+  relying on normalisation to paper over it.
+- `internal/ingest` - date/amount parsing (`parsePaymentTime`,
+  `parseSettlementTime`, `parseOffset`, `parseAmount`) had no test coverage at
+  all before this pass; added it and found two real bugs in the process (see
+  Error handling below): `Transaction Release Date` sometimes abbreviates the
+  month (`"1 Aug 2026..."`) and wasn't tried; `parseOffset`'s `hh:mm` branch
+  silently swallowed a malformed minutes value. Both fixed and covered.
 
 ### PostgreSQL dump
 ```bash
@@ -87,6 +99,127 @@ pg_dump --no-owner --no-privileges -Fc "$RECON_DSN" -f out/pg_dump_after_ingest.
 | `pg_dump_after_ingest.dump` | full compressed `pg_dump` (custom format) after the after-fix run |
 | `sample_schema.sql` | schema-only dump |
 | `sample_rows.csv` | representative rows from every table (configs in full; 200-300 rows each for the large tables) |
+
+---
+
+## Error handling
+
+A single malformed row (a garbled date, a non-numeric amount) must not abort
+ingestion of the other 78,000 - but it must not vanish either. `internal/ingest`
+draws that line as: recover (treat as zero/blank, exactly as before) **and**
+count + sample it, surfaced as a `WARNING:` block on stderr after `recon
+ingest` if anything happened:
+
+```bash
+go run ./cmd/recon ingest
+# WARNING: 3 row(s) had a value that could not be parsed (treated as zero/blank, not skipped):
+#   3 x payment amount unparseable
+#   examples:
+#     payment amount unparseable: line 4821, column "selling fees": "N/A" is not a number
+```
+
+This replaced silently discarding the error at three call sites
+(`parsePaymentTime`/`parseSettlementTime`/`parseAmount` in `payments.go` /
+`settlements.go`), found while reviewing error handling. Writing the tests for
+this immediately caught two real, previously-invisible bugs against the actual
+supplied data (not synthetic cases):
+1. `Transaction Release Date` abbreviates the month for 1,153 of 20,498 real
+   rows (`"1 Aug 2026..."` vs the usual `"17 July 2026..."`) - `date/time`
+   never does this, only the release-date column, and only sometimes. The
+   parser only tried the full-month layout, so these 1,153 release dates were
+   silently failing and falling back to the order's `date/time` instead -
+   wrong for `record_ref`'s `date` token, though it turned out these
+   particular rows are all outside the reconciliation scope (a later
+   settlement), so no Summary or reconciled-record impact. Fixed:
+   `parsePaymentTime` now tries both `January` and `Jan` layouts.
+2. `parseOffset`'s `hh:mm` branch discarded the minutes' parse error
+   (`mm, _ = strconv.Atoi(...)`), unlike the branch beside it - a `+09:XX`
+   with a bad minutes part would have silently become `+09:00`. Never
+   triggered by real data (every offset in this file is whole-hour, `+9`),
+   caught only by direct unit tests. Fixed.
+
+`parseAmount` also changed shape: `(0, nil)` for a blank cell (expected -
+most of a payments row's 11 amount columns are blank) vs `(0, err)` for a
+cell that has content but isn't a number (not expected, must be surfaced).
+Before, both cases returned a bare `0`, indistinguishable.
+
+## Idempotent re-ingestion
+
+- `recon migrate` / `recon ingest` / `recon fixes` are each safe to re-run:
+  `Engine.Run` truncates `amount_entry`, `source_row`, `summary_total`,
+  `recon_record` before rebuilding, so re-running `ingest` (or `all`) any
+  number of times converges to the identical end state - verified throughout
+  this project by re-running the full pipeline from a dropped/recreated
+  database after every change and diffing the results.
+- **Found and fixed a real gap**: `recon fixes` was not safe to run twice in a
+  row. `MAPPING_FIXES.sql`'s `UPDATE`/`DELETE` statements are naturally
+  idempotent, but its one `INSERT` (Defect 5, adding a new config rule) would
+  insert a second, duplicate row on a second application - reproduced this
+  concretely (`recon fixes` twice → two identical `payment_config` rows at
+  `file_line_no=9999`) before fixing it. Fixed two ways: the insert is now
+  preceded by `delete from payment_config where file_line_no = 9999` (so
+  re-applying the file converges instead of accumulating), and
+  `payment_config`/`settlement_config` both gained a `unique (file_line_no)`
+  constraint (`migrations/001_schema.sql`) so any *other* accidental duplicate
+  insert fails loudly instead of silently corrupting the config table.
+  Re-verified: `recon fixes` run twice in a row now leaves exactly one row and
+  identical reconciliation numbers both times.
+- `ingest_batch` is the one table that is **not** reset by a re-ingest (by
+  design - it's a history of ingestion runs, `source_row.batch_id` always
+  points at the latest one). Repeated `recon ingest` runs will accumulate
+  batch history rows over time; this is intentional and harmless (nothing
+  else references a stale batch id), but worth knowing if the table's growth
+  is ever surprising.
+
+## Performance
+
+Measured on the supplied files (23,026 payment rows exploding to ~107,940
+non-zero amount columns; 54,979 settlement lines) via `recon ingest`'s
+per-phase timing (now printed on every run) and an isolated `report.Generate`
+timing pass:
+
+| phase | time | rows/sec |
+|---|--:|--:|
+| CSV parse + config match + date/amount parse (Go, no DB) | ~1.4s | - |
+| `source_row` insert (batched `INSERT ... RETURNING id`, batches of 500) | ~4.9s | ~15,900/s |
+| `amount_entry` COPY (batches of 20,000) | ~5.1s | ~31,900/s |
+| **ingest total** | **~11.5s** | |
+| `reconcile` (one SQL statement, full-outer aggregate) | ~3.6s | |
+| `report.Generate`: DB query (`recon_record` + the raw-total window function) | ~0.9s | |
+| `report.Generate`: excelize in-memory writes (2 sheets, ~884k cells) | ~1.0s | |
+| `report.Generate`: `SaveAs` (zip/XML serialise to disk) | ~1.4s | |
+| **report total** | **~3.5s** | |
+
+Both DB-writing phases and `reconcile`/`report`'s SQL scale **linearly** with
+row count - checked for the classic risk (an accidental cross-join or
+per-row-vs-all-rows comparison) and found none: every aggregate goes through
+`group by record_ref` (indexed) or a window function partitioned the same
+way, never a self-join over the full table. Config matching
+(`MatchPayment`/`MatchSettlement`) is a linear scan over the ~150 config
+rules per amount entry, but the rule count doesn't grow with file size, so
+total matching cost is `O(entries × constant)`, not `O(entries²)`. On a 10x
+larger pair of files, naive linear extrapolation puts the full pipeline at
+roughly 2-3 minutes - a batch job, not something needing async/background
+handling for this use case.
+
+Where the time actually goes is not where a first guess would put it:
+`report.Generate`'s Go-side excelize writing + serialisation (~2.4s of 3.5s,
+~70%) is larger than the DB query that feeds it (~0.9s), and about as large as
+the DB-writing side of ingest. **Tried and measured, not just assumed**: since
+excelize's `SetCellValue` is known to re-walk the sheet's internal structure
+per call, switched `writeConsolidated` to one `SetSheetRow` call per row
+(~884k calls → ~23k) expecting a meaningful win - measured repeatedly before
+and after and found **no significant difference** at this row count (~1.0s
+either way). Kept the change anyway (it isn't slower, and it's a smaller API
+surface), but corrected the comment in `report.go` rather than claim a result
+that didn't hold up. The actual largest single cost, `SaveAs`'s zip/XML
+serialisation (~1.4s, ~40% of `report.Generate`), would need excelize's
+`StreamWriter` API to meaningfully cut - a real, identifiable next step for a
+much larger Consolidated Data sheet, deliberately not done here: it changes
+`writeConsolidated`'s API from random-access `SetCellValue`/`SetSheetRow` to
+strictly-sequential row writing, which is a non-trivial rewrite of the one
+function every number in the workbook passes through, and isn't justified by
+the data sizes this project actually has to handle.
 
 ---
 

@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -80,7 +81,15 @@ func runIngest(ctx context.Context, pool *pgxpool.Pool) {
 	eng, err := ingest.NewEngine(ctx, pool)
 	must(err)
 	must(eng.Run(ctx, paymentsFile, settlementsFile))
-	fmt.Printf("ingested: %d amount_entry rows\n", eng.EntryCount())
+	srcInsert, entCopy := eng.Timings()
+	fmt.Printf("ingested: %d amount_entry rows (source_row insert: %s, amount_entry COPY: %s)\n",
+		eng.EntryCount(), srcInsert.Round(time.Millisecond), entCopy.Round(time.Millisecond))
+	if n := eng.WarningCount(); n > 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: %d row(s) had a value that could not be parsed (treated as zero/blank, not skipped):\n", n)
+		for _, line := range eng.WarningLines() {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
 }
 
 func runReconcile(ctx context.Context, pool *pgxpool.Pool) {

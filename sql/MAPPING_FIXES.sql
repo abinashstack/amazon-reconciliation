@@ -172,7 +172,16 @@ update settlement_config set summary_pos = '', summary_neg = ''
 --       record_ref and collapse into one Consolidated Data row. Exact-
 --       description transfer rules (TRANSFER/MICRO_DEPOSIT/other, L61) still
 --       win by match precedence, so this only catches the generic disbursement.
+--
+-- Idempotency: `recon fixes` is safe to run more than once (e.g. after a
+-- retry) for every UPDATE/DELETE above - re-applying them is a no-op. This is
+-- the one INSERT in the file, so it needs its own guard: delete the
+-- fixture's own file_line_no first, so applying this file twice ends up with
+-- one row, not two (payment_config.file_line_no also carries a unique
+-- constraint as a second line of defence - see migrations/001_schema.sql).
 -- ---------------------------------------------------------------------------
+delete from payment_config where file_line_no = 9999;
+
 insert into payment_config
   (file_line_no, transaction_type_raw, transaction_type_norm,
    description_raw, description_norm, is_desc_wildcard,

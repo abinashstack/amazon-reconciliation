@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/csv"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -71,14 +72,20 @@ func (e *Engine) ingestSettlements(ctx context.Context, path string) error {
 		}
 		s.kind = "settlement_line"
 
-		amt := parseAmount(m["amount"])
+		amt, err := parseAmount(m["amount"])
+		if err != nil {
+			e.warn.add("settlement amount unparseable", fmt.Sprintf("line %d: %v", line, err))
+		}
 		amountTypeRaw := m["amount-type"]
 		amountDescRaw := m["amount-description"]
 		txnNorm := normalize.Key(txnRaw)
 		amountTypeNorm := normalize.Key(amountTypeRaw)
 		amountDescNorm := normalize.Key(amountDescRaw)
 
-		posted, _ := parseSettlementTime(firstNonEmpty(m["posted-date-time"], m["posted-date"]))
+		posted, err := parseSettlementTime(firstNonEmpty(m["posted-date-time"], m["posted-date"]))
+		if err != nil {
+			e.warn.add("settlement posted-date unparseable", fmt.Sprintf("line %d: %v", line, err))
+		}
 
 		rf := recordref.Fields{
 			OrderRef:        strings.TrimSpace(m["order-id"]),

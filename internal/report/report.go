@@ -180,33 +180,34 @@ func writeConsolidated(f *excelize.File, recs []reconRow, buckets []string) erro
 		return recs[i].recordRef < recs[j].recordRef
 	})
 
-	r := 2
-	for _, rec := range recs {
-		col := 1
-		put := func(v any) { c, _ := excelize.CoordinatesToCellName(col, r); f.SetCellValue(s, c, v); col++ }
-		put(rec.recordRef)
-		put(rec.status)
-		put(rec.txnType)
-		put(rec.description)
-		put(rec.sku)
-		put(rec.date)
-		put(rec.settlementID)
-		put(rec.paymentTxnStatus)
-		put(rec.inSummaryScope)
-		put(round2(rec.payRawTotal))
-		put(round2(rec.setRawTotal))
+	// One SetSheetRow call per row (the whole row's values in a slice) rather
+	// than one SetCellValue call per cell - ~884k individual calls collapsed
+	// to ~23k for the supplied data. Measured this against SetCellValue
+	// before keeping it: NOT a meaningful speed difference at this row count
+	// (~1.0s either way - see README's Performance section for the numbers),
+	// so this is not "the fix" for larger files. Kept anyway since it isn't
+	// slower and is a smaller API surface than a per-cell closure; the actual
+	// cost at this scale is excelize's SaveAs serialization (~1.4s, ~40% of
+	// report.Generate), which only a streaming writer would meaningfully cut.
+	row := make([]any, 0, 9+3*len(buckets)+2)
+	for i, rec := range recs {
+		row = row[:0]
+		row = append(row, rec.recordRef, rec.status, rec.txnType, rec.description, rec.sku,
+			rec.date, rec.settlementID, rec.paymentTxnStatus, rec.inSummaryScope,
+			round2(rec.payRawTotal), round2(rec.setRawTotal))
 		for _, b := range buckets {
-			put(round2(rec.payBuckets[b]))
+			row = append(row, round2(rec.payBuckets[b]))
 		}
 		for _, b := range buckets {
-			put(round2(rec.setBuckets[b]))
+			row = append(row, round2(rec.setBuckets[b]))
 		}
 		for _, b := range buckets {
-			put(round2(rec.payBuckets[b] - rec.setBuckets[b]))
+			row = append(row, round2(rec.payBuckets[b]-rec.setBuckets[b]))
 		}
-		put(rec.payRowIDs)
-		put(rec.setRowIDs)
-		r++
+		row = append(row, rec.payRowIDs, rec.setRowIDs)
+		if err := f.SetSheetRow(s, cell("A", i+2), &row); err != nil {
+			return err
+		}
 	}
 	f.SetPanes(s, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 	return nil

@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/abinashstack/amazon-reconciliation/internal/mapping"
 	"github.com/abinashstack/amazon-reconciliation/internal/normalize"
@@ -84,8 +83,14 @@ func (e *Engine) ingestPayments(ctx context.Context, path string) error {
 		descRaw := m["description"]
 		descNorm := normalize.Key(descRaw)
 
-		event, _ := parsePaymentTime(m["date/time"])
-		release, _ := parsePaymentTime(m["Transaction Release Date"])
+		event, err := parsePaymentTime(m["date/time"])
+		if err != nil {
+			e.warn.add("payment date/time unparseable", fmt.Sprintf("line %d: %v", line, err))
+		}
+		release, err := parsePaymentTime(m["Transaction Release Date"])
+		if err != nil {
+			e.warn.add("payment Transaction Release Date unparseable", fmt.Sprintf("line %d: %v", line, err))
+		}
 		if release.IsZero() {
 			release = event // fallback: unreleased/adjustment rows key on posted date
 		}
@@ -105,7 +110,11 @@ func (e *Engine) ingestPayments(ctx context.Context, path string) error {
 			if !ok || cell >= len(rec) {
 				continue
 			}
-			amt := parseAmount(rec[cell])
+			amt, err := parseAmount(rec[cell])
+			if err != nil {
+				e.warn.add("payment amount unparseable", fmt.Sprintf("line %d, column %q: %v", line, ac.Header, err))
+				continue
+			}
 			if amt == 0 {
 				continue
 			}
@@ -181,17 +190,18 @@ func physLine(lines []string, n int) string {
 	return ""
 }
 
-func parseAmount(s string) float64 {
+// parseAmount returns (0, nil) for a blank cell - expected and common in the
+// wide payments format - and (0, err) for a cell that has content but isn't a
+// number, which is NOT expected and must be surfaced, not silently zeroed.
+func parseAmount(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, ",", "")
 	if s == "" {
-		return 0
+		return 0, nil
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("%q is not a number", s)
 	}
-	return v
+	return v, nil
 }
-
-var _ = time.Time{}

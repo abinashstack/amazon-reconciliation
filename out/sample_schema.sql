@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict fmNtcKEtKmDVwZn3WFEcKk6WSdxDKzQNGpdNpvbInQwEd5Rdwn8OD4rq69ulqle
+\restrict JmODQ9vvw2E4Mqol9u8YrgcSc1LF8vZ6KGMgxfpgZtrURxEhphtvFjrgElYzZla
 
 -- Dumped from database version 17.11
 -- Dumped by pg_dump version 17.11
@@ -244,6 +244,14 @@ ALTER TABLE ONLY public.ingest_batch
 
 
 --
+-- Name: payment_config payment_config_file_line_no_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.payment_config
+    ADD CONSTRAINT payment_config_file_line_no_key UNIQUE (file_line_no);
+
+
+--
 -- Name: payment_config payment_config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -257,6 +265,14 @@ ALTER TABLE ONLY public.payment_config
 
 ALTER TABLE ONLY public.recon_record
     ADD CONSTRAINT recon_record_pkey PRIMARY KEY (record_ref);
+
+
+--
+-- Name: settlement_config settlement_config_file_line_no_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.settlement_config
+    ADD CONSTRAINT settlement_config_file_line_no_key UNIQUE (file_line_no);
 
 
 --
@@ -353,5 +369,5 @@ ALTER TABLE ONLY public.source_row
 -- PostgreSQL database dump complete
 --
 
-\unrestrict fmNtcKEtKmDVwZn3WFEcKk6WSdxDKzQNGpdNpvbInQwEd5Rdwn8OD4rq69ulqle
+\unrestrict JmODQ9vvw2E4Mqol9u8YrgcSc1LF8vZ6KGMgxfpgZtrURxEhphtvFjrgElYzZla
 
