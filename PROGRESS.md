@@ -185,3 +185,49 @@ empirical, not `go test`):
   field came back blank in the test - unrelated to the real ingesters, which
   always populate it.)
 - No code changes this round - purely verification. No re-ingest needed.
+
+## 2026-09-12 (later still) — code structure review: separation of ingest/recon/report
+
+Prompted to review clarity and structure, specifically the separation between
+ingest / recon / report. Found and fixed two real structural issues rather
+than just describing them:
+
+1. **Config matching lived inside the `ingest` package** (`config.go`:
+   `Configs`, `MatchPayment`, `MatchSettlement`, `summaryFor`,
+   `ImportConfigCSVs`, `LoadConfigsFromDB`) even though "apply the mapping
+   configs" is its own concern (assignment part 2), distinct from `ingest`'s
+   actual job (parse files, batch-insert, COPY). Extracted to a new
+   `internal/mapping` package - mechanical move, confirmed low-risk first by
+   grepping for any file outside config.go/config_test.go that referenced
+   `PaymentRule`/`SettlementRule`/`Configs` directly (only one: `ingest.go`'s
+   `cfg.Payment`/`cfg.Settlement` field access, which keeps compiling
+   unchanged since the field names didn't move). `summaryFor` exported as
+   `SummaryFor` for cross-package use. Package boundaries now mirror the
+   assignment's four numbered parts one-to-one.
+
+2. **The Summary-sheet diff computation existed in two places that had to be
+   kept in sync by hand**: `report.writeSummary` (drives the xlsx) and a
+   second, independent SQL query inline in `cmd/recon/main.go`'s
+   `printMismatches` (drives the `recon mismatches` CLI text output) - both
+   reading `ScopedSummarySQL` but then re-deriving the pivot/diff/
+   summary_layout join separately. Moved that logic into
+   `report.Mismatches()`; `main.go` is now a thin formatter that calls it. The
+   CLI text and the workbook can no longer silently compute the diff two
+   different ways.
+
+Also, while re-reading `ingest.go`: found `ingestPayments`/`ingestSettlements`
+each ended with their own `flushSource()` call, immediately followed by
+`Engine.Run()` calling `flushSource()` again - the second call was always a
+no-op (the buffer both ingesters flush is guaranteed empty by then), just
+confusing to a reader wondering why it's called three times. Removed the two
+per-ingester calls; `Run()` is now the single place the terminal flush
+happens. Added a comment on the `srcRow`/`pendingEntry`/`entRow` split
+explaining *why* it's a three-stage buffer (Postgres generates
+`source_row.id`, which `amount_entry` FKs to, only after INSERT - not
+incidental complexity).
+
+Verified zero behavioural change: `go build`, `go vet`, `go test ./...` all
+clean, and a full clean pipeline re-run (`all` -> `mismatches` -> `fixes` ->
+`report` -> `mismatches`) produced byte-identical results to before the
+refactor (162,919 `amount_entry`, same 5 before-fix mismatches, same
+9387/13289/0 and "no mismatches" after).

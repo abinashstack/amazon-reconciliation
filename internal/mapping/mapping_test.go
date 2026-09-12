@@ -1,4 +1,4 @@
-package ingest
+package mapping
 
 import "testing"
 
@@ -27,8 +27,8 @@ func TestSummaryFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := summaryFor(tc.amount, tc.pos, tc.neg); got != tc.want {
-				t.Fatalf("summaryFor(%v, %q, %q) = %q, want %q", tc.amount, tc.pos, tc.neg, got, tc.want)
+			if got := SummaryFor(tc.amount, tc.pos, tc.neg); got != tc.want {
+				t.Fatalf("SummaryFor(%v, %q, %q) = %q, want %q", tc.amount, tc.pos, tc.neg, got, tc.want)
 			}
 		})
 	}

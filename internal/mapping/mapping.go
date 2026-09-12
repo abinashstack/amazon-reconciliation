@@ -1,4 +1,13 @@
-package ingest
+// Package mapping is "step 2" of the pipeline: turning a normalised raw value
+// into a reconcilable, summarisable record by applying the two mapping
+// config files. It owns the config tables (payment_config / settlement_config),
+// the wildcard/precedence match rules, and the sign-based summary-bucket
+// choice - deliberately separate from internal/ingest (file parsing and
+// Postgres persistence mechanics) and internal/reconcile (aggregating already-
+// mapped amount_entry rows). ingest calls into this package once per amount to
+// get back a matched rule + a match_note; it never re-implements matching
+// itself.
+package mapping
 
 import (
 	"context"
@@ -46,8 +55,9 @@ type Configs struct {
 	Settlement []SettlementRule
 }
 
-// SummaryField picks the positive/negative bucket for a signed amount.
-func summaryFor(amount float64, pos, neg string) string {
+// SummaryFor picks the positive/negative bucket for a signed amount. Zero
+// routes to pos by convention (adding zero never changes a total either way).
+func SummaryFor(amount float64, pos, neg string) string {
 	if amount < 0 {
 		return neg
 	}

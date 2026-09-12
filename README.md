@@ -66,11 +66,11 @@ mechanisms directly:
   fixed in `internal/recordref/recordref.go` (no numeric effect here since
   that template path is unused in this dataset; re-confirmed by re-running the
   full pipeline before/after - identical `amount_entry` count and mismatches).
-- `internal/ingest` - `MatchPayment`/`MatchSettlement` wildcard precedence
+- `internal/mapping` - `MatchPayment`/`MatchSettlement` wildcard precedence
   (exact type+desc > exact type+wildcard > catch-all+exact > catch-all+wildcard;
   `amount_field`/`amount_type` never wildcarded; tie-break by `file_line_no`,
   independent of slice order - reproduces the real duplicate-rule defect) and
-  `summaryFor` sign-based routing (positive/negative/zero, asymmetric
+  `SummaryFor` sign-based routing (positive/negative/zero, asymmetric
   pos≠neg buckets, both-blank stays unsummarised regardless of sign).
 
 ### PostgreSQL dump
@@ -268,7 +268,7 @@ into the Consolidated sheet.
    vice-versa.
 7. **Amounts** keep their sign from the source. The positive/negative summary
    bucket is chosen by the sign of the individual amount; a zero amount routes
-   to the *positive* bucket by convention (`internal/ingest/config.go:summaryFor`)
+   to the *positive* bucket by convention (`internal/mapping/mapping.go:SummaryFor`)
    - inconsequential for every total (adding zero is a no-op either way) but
      worth stating since the config schema only names "positive"/"negative".
 8. **Zero payment amount slots** produce no `amount_entry` (payments are wide -
@@ -285,15 +285,27 @@ into the Consolidated sheet.
 ## Layout
 
 ```
-cmd/recon/            CLI entrypoint
+cmd/recon/            CLI entrypoint - argument dispatch + text/exit-code I/O only
 internal/db/          pgx pool + .sql migration runner
 internal/normalize/   the canonical-key function + payment column map
 internal/recordref/   record_ref template evaluator
-internal/ingest/      config import, payments + settlements ingesters, summary
-internal/reconcile/   amount_entry -> recon_record
-internal/report/      excelize workbook writer
+internal/mapping/     the two config tables, wildcard/precedence matching, sign routing
+internal/ingest/      file parsing + Postgres persistence (batching, COPY); calls mapping, never re-implements it
+internal/reconcile/   amount_entry -> recon_record (the N:M aggregate-then-match step)
+internal/report/      excelize workbook writer + the Mismatches() query cmd/recon's `mismatches` reuses
 migrations/           schema + summary_layout seed
 sql/MAPPING_FIXES.sql the config-level defect fixes
 data/                 the four input files
 out/                  generated reports + pg dump
 ```
+
+Package boundaries deliberately mirror the assignment's four numbered parts:
+`mapping` is "apply the mapping configs" (part 2) as its own package, independent
+of `ingest`'s file-parsing/persistence mechanics (part 1) and `reconcile`'s
+aggregation (part 3) - `ingest` calls `mapping.MatchPayment`/`MatchSettlement`
+once per amount and never duplicates the precedence logic itself. `report`
+(part 4) owns every "what does the Summary sheet say" computation, including
+for `recon mismatches` (`report.Mismatches`) - `cmd/recon` only formats and
+prints what `report` returns, so the CLI's text summary and the workbook can
+never compute the diff two different ways and silently drift apart (they did,
+briefly, during development - see PROGRESS.md).

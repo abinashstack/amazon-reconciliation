@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abinashstack/amazon-reconciliation/internal/mapping"
 	"github.com/abinashstack/amazon-reconciliation/internal/normalize"
 	"github.com/abinashstack/amazon-reconciliation/internal/recordref"
 )
@@ -129,7 +130,7 @@ func (e *Engine) ingestPayments(ctx context.Context, path string) error {
 				id := rule.ID
 				pe.matchedConfigID = &id
 				pe.matchNote = note
-				pe.summaryField = summaryFor(amt, rule.SummaryPos, rule.SummaryNeg)
+				pe.summaryField = mapping.SummaryFor(amt, rule.SummaryPos, rule.SummaryNeg)
 				if ref, ok := recordref.Build(rule.RecordRefTmpl, rf); ok {
 					pe.recordRef = ref
 				}
@@ -143,7 +144,7 @@ func (e *Engine) ingestPayments(ctx context.Context, path string) error {
 			return err
 		}
 	}
-	return e.flushSource(ctx)
+	return nil // Engine.Run flushes any remaining buffered rows once, after both files
 }
 
 // --- helpers shared with settlements.go ---

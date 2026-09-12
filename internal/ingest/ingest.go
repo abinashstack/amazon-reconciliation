@@ -10,13 +10,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/abinashstack/amazon-reconciliation/internal/mapping"
 	"github.com/abinashstack/amazon-reconciliation/internal/recordref"
 )
 
 // Engine runs a full ingestion pass over both files.
 type Engine struct {
 	pool *pgxpool.Pool
-	cfg  *Configs
+	cfg  *mapping.Configs
 
 	batchID uuid.UUID
 
@@ -34,6 +35,13 @@ type summ struct {
 	count  int64
 }
 
+// srcRow / pendingEntry / entRow exist as three separate stages because of a
+// genuine ordering constraint, not incidental complexity: amount_entry.source_row_id
+// is a foreign key to source_row's Postgres-generated id, which isn't known
+// until AFTER that row is INSERTed. So a source row is first buffered as
+// srcRow with its would-be amount_entry rows as pendingEntry (no id yet);
+// flushSource() inserts the batch, learns each row's id, and "promotes" each
+// pendingEntry to an entRow (id attached) for flushEntries()'s COPY.
 type srcRow struct {
 	file    string
 	lineNo  int
@@ -78,9 +86,9 @@ type entRow struct {
 }
 
 // NewEngine loads the config matcher from the DB tables and prepares a batch.
-// Import the CSVs first with ImportConfigCSVs (once) so the tables exist.
+// Import the CSVs first with mapping.ImportConfigCSVs (once) so the tables exist.
 func NewEngine(ctx context.Context, pool *pgxpool.Pool) (*Engine, error) {
-	cfg, err := LoadConfigsFromDB(ctx, pool)
+	cfg, err := mapping.LoadConfigsFromDB(ctx, pool)
 	if err != nil {
 		return nil, err
 	}

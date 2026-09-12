@@ -42,6 +42,54 @@ union all
 select 'settlements'::text as src, field, amt from setl
 `
 
+// MismatchLine is one Summary line where the Payments and Settlements columns
+// disagree.
+type MismatchLine struct {
+	Field       string // config summary_field slug, for tracing back to MAPPING_FIXES.sql
+	Section     string
+	Label       string
+	Payments    float64
+	Settlements float64
+	Diff        float64
+}
+
+// Mismatches returns every Summary line with a nonzero Payments-Settlements
+// diff, over the same ScopedSummarySQL the xlsx Summary sheet is built from -
+// the single source of truth for "does this line tie", used by both
+// `recon report` and `recon mismatches` so they can never disagree with each
+// other.
+func Mismatches(ctx context.Context, pool *pgxpool.Pool) ([]MismatchLine, error) {
+	rows, err := pool.Query(ctx, `
+		with scoped as (`+ScopedSummarySQL+`),
+		agg as (
+		  select field,
+		         sum(amt) filter (where src = 'payments')    as pay,
+		         sum(amt) filter (where src = 'settlements') as setl
+		  from scoped
+		  group by field
+		)
+		select a.field, coalesce(l.section,'?'), coalesce(l.line_label, a.field),
+		       coalesce(a.pay,0), coalesce(a.setl,0),
+		       round((coalesce(a.pay,0) - coalesce(a.setl,0))::numeric, 2) as diff
+		from agg a
+		left join summary_layout l on l.summary_field = a.field
+		where round((coalesce(a.pay,0) - coalesce(a.setl,0))::numeric, 2) <> 0
+		order by 2, 3`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MismatchLine
+	for rows.Next() {
+		var m MismatchLine
+		if err := rows.Scan(&m.Field, &m.Section, &m.Label, &m.Payments, &m.Settlements, &m.Diff); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 func loadSummaryTotals(ctx context.Context, pool *pgxpool.Pool) (map[[2]string]float64, error) {
 	rows, err := pool.Query(ctx, ScopedSummarySQL)
 	if err != nil {
