@@ -16,9 +16,18 @@
 --             (applies this file to the config tables, then re-ingests +
 --              reconciles; loadconfigs is NOT re-run, so these edits persist)
 --
--- All fixes are UPDATE/DELETE on the config DATA. No number is plugged; each
--- block routes amounts the same way the opposite source already routes the
--- economically-equivalent amount.
+-- All five Summary-sheet defects below (1-5) turned out to be fully
+-- expressible as config-data edits - none needed a change to the matching
+-- code. No number is plugged; each block routes amounts the same way the
+-- opposite source already routes the economically-equivalent amount.
+--
+-- Not every defect found during this engagement was a config-routing issue.
+-- Section 2, after the numbered defects, documents the ones that were NOT:
+-- what they are, why MAPPING_FIXES.sql cannot fix them (no UPDATE/DELETE/
+-- INSERT touches the affected code path), where the real fix lives, and what
+-- was actually done about each. They are commented out (no SQL runs) because
+-- there is nothing here for `recon fixes` to apply - the fix already shipped
+-- as a code change in the commit named in each block, not as config data.
 -- ============================================================================
 
 begin;
@@ -173,6 +182,14 @@ update settlement_config set summary_pos = '', summary_neg = ''
 --       description transfer rules (TRANSFER/MICRO_DEPOSIT/other, L61) still
 --       win by match precedence, so this only catches the generic disbursement.
 --
+-- This INSERT fully fixes the row-fragmentation itself. It does NOT fix the
+-- broader class of problem it revealed - a record whose only entries are
+-- unsummarised renders with every bucket column at 0.00, the real amount
+-- invisible unless you follow the row-id trace-back - because that is a
+-- Consolidated Data *rendering* question, which the config has no vocabulary
+-- for (it only ever says "which bucket", never "show this amount anyway").
+-- That part of the fix is in code: see item 2.1 below.
+--
 -- Idempotency: `recon fixes` is safe to run more than once (e.g. after a
 -- retry) for every UPDATE/DELETE above - re-applying them is a no-op. This is
 -- the one INSERT in the file, so it needs its own guard: delete the
@@ -192,3 +209,113 @@ values
    '{"note":"MAPPING_FIXES.sql defect 5 - collapses the other/total split for generic transfers"}'::jsonb);
 
 commit;
+
+-- ============================================================================
+-- SECTION 2 - defects and near-defects that were NOT config-data problems
+--
+-- Nothing below this line is SQL to run (it's all inside a comment block) -
+-- there is no config-table edit that fixes any of these. Included per the
+-- instruction to document a defect even when the fix doesn't belong here,
+-- and say plainly where it does.
+-- ============================================================================
+
+/*
+2.1  Consolidated Data hides real money on an all-unsummarised record
+     (companion to DEFECT 5 above - Consolidated Data only, no Summary impact)
+
+     Even after 5's INSERT collapses the two Transfer rows to one row each,
+     that one row still shows 0.00 in every P:/S: bucket column, because
+     neither `other` nor `total` was ever meant to be summarised (both
+     legitimately route to '' - the money is a bank payout, not P&L). A
+     reader sees an all-zero row for a real -133,756.51 / -97,919.76 movement
+     with no number anywhere on it except by following the row-id trace-back
+     into source_row.
+
+     Why config can't fix this: `to_summary_field_when_positive/negative_amount`
+     can only ever name a bucket or be blank - there's no config-expressible
+     instruction meaning "show this amount on the row even though it doesn't
+     belong to any bucket". That's a Consolidated-sheet rendering decision,
+     not a routing decision.
+
+     Where the fix lives: internal/report/report.go +
+     internal/report/queries.go. Added two columns, "P: raw total (all
+     entries, incl. unsummarised)" and "S: ..." - the sum of every
+     amount_entry for a record_ref regardless of summary_field, so an
+     all-unsummarised record still shows its real number. (First version of
+     this double-counted ordinary orders by also summing their redundant
+     `total` entry on top of its real components; fixed by excluding `total`
+     from the sum whenever the same record has a non-`total` entry.)
+     Verified from the generated .xlsx itself: the two Transfer rows show
+     their exact real amounts, not zero and not doubled.
+
+2.2  Summary sheet's scope filter was not reconstructable from the report
+     (not a routing defect - a report-completeness gap, found when asked
+      "can any number in the report be traced back to source rows?")
+
+     The Summary sheet's Payments column is scoped to Released payments in
+     the settlement present in the file (README Assumption 2) - necessarily
+     so, or the column includes three other settlements' worth of unrelated
+     payments and never ties to anything. But neither that scope rule nor a
+     "Released vs Deferred" flag appeared anywhere in Consolidated Data, so a
+     reader summing the unfiltered P: column got 607,360.68 against the
+     Summary's 348,815.93 with no way to see why from the workbook alone.
+
+     Why config can't fix this: `payment_txn_status` and reconciliation scope
+     aren't amounts to route - config has no row that could add a visibility
+     column to a report sheet.
+
+     Where the fix lives: internal/reconcile/reconcile.go (computes
+     `payment_txn_status` and `in_summary_scope` once per record_ref, now
+     columns on recon_record) and internal/report/report.go (surfaces them
+     as "payment transaction status" / "in Summary sheet scope" in
+     Consolidated Data). Verified from the generated .xlsx: filtering to
+     "in Summary sheet scope = TRUE" and summing a P: column reproduces the
+     Summary figure exactly.
+
+2.3  record_ref's `record_type` token wasn't upper-cased
+     (a matching/key-construction bug, not a mapping-config defect - found by
+      unit-testing internal/recordref, which had no coverage before)
+
+     Every OTHER record_ref token (literals, `description`) is upper-cased
+     before being joined into the key; `record_type` was the one exception,
+     an inconsistency with no config cause - the template that uses this
+     token (settlement_config L138, `...+record_type+settlement_id`) never
+     actually matches any row in the supplied data, so it had zero numeric
+     effect here, but would have produced an inconsistently-cased key the
+     moment that rule ever fired.
+
+     Why config can't fix this: `record_type` isn't a config value at all -
+     it's a Go-side constant (`"payment_txn"` / `"settlement_line"`) baked
+     into the record_ref template evaluator.
+
+     Where the fix lives: internal/recordref/recordref.go
+     (`strings.ToUpper` added to the `record_type` case). Covered by
+     internal/recordref/recordref_test.go. Re-ran the full pipeline
+     before/after: identical amount_entry count and identical mismatches,
+     confirming no numeric impact on this dataset.
+
+2.4  Transaction Release Date parser didn't handle an abbreviated month
+     (a date-parsing bug, not a mapping-config defect - found while adding
+      error-handling visibility for previously-silently-discarded parse
+      errors)
+
+     `Transaction Release Date` abbreviates the month for 1,153 of 20,498
+     real rows ("1 Aug 2026..." vs the usual "17 July 2026..."); the parser
+     only tried the full-month layout, so these releases were silently
+     failing to parse and falling back to the order's `date/time` instead -
+     which would corrupt the `date` token of record_ref for those specific
+     rows had they been in the reconciliation scope (they are not - a later
+     settlement - so no Summary or reconciled-record impact here, but this
+     was a real, previously invisible defect, not a hypothetical one).
+
+     Why config can't fix this: date parsing happens before any config rule
+     is consulted - there's no config row that governs how a raw date string
+     is read.
+
+     Where the fix lives: internal/ingest/dates.go (`parsePaymentTime` now
+     tries both "January" and "Jan" layouts). Covered by
+     internal/ingest/parse_test.go. Re-ran the full pipeline before/after:
+     identical amount_entry count, identical before/after-fix Summary
+     numbers; only `unreconciled_payment`'s count shifted, and only among
+     the out-of-scope rows this fix corrected the key for.
+*/

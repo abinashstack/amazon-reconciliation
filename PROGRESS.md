@@ -353,3 +353,39 @@ Full clean pipeline re-run after all of the above: same 162,919 `amount_entry`,
 same 5 before-fix mismatches, same after-fix "no mismatches", reconciled=13289
 unchanged (only `unreconciled_payment` shifted by a couple, out-of-scope
 rows only, from the date-parsing correction).
+
+## 2026-09-14 — MAPPING_FIXES.sql: document non-config-fixable items too
+
+User's deliverable checklist called out one gap explicitly: MAPPING_FIXES.sql
+had a commented block per config-fixable defect (5, all fully fixed in config
+data), but nothing for a defect that ISN'T fixable in config, or where the
+real fix belongs in matching logic instead - required by the original brief
+too ("if you believe a fix genuinely cannot be expressed in the config
+schema, say so").
+
+Reviewed the session for genuine non-config cases rather than inventing one:
+all 5 Summary-sheet routing defects were fully config-fixable (said so
+explicitly now, in the file's header). Four *other* real issues found during
+this engagement were NOT expressible in config at all - added as a clearly
+separated, non-executing SQL comment block (Section 2) in MAPPING_FIXES.sql,
+each stating what the defect is, why config can't express the fix, where the
+real fix lives, and what was done:
+  2.1 Consolidated Data showing an all-zero row for an all-unsummarised
+      record (companion to Defect 5) - fixed with the raw-total columns in
+      internal/report.
+  2.2 Summary sheet's scope filter not reconstructable from the report -
+      fixed with payment_txn_status/in_summary_scope in
+      internal/reconcile + internal/report.
+  2.3 record_ref's record_type token not upper-cased - fixed in
+      internal/recordref/recordref.go.
+  2.4 Transaction Release Date's abbreviated-month rows silently mis-parsing
+      - fixed in internal/ingest/dates.go.
+
+Verified the file still applies cleanly with the added comment block (valid
+SQL `/* */`, nothing executes from it): full clean pipeline re-run, identical
+results to before this edit - reconciled=13289, unreconciled_payment=9386,
+unreconciled_settlement=0, before-fix mismatches unchanged, after-fix "no
+mismatches" unchanged. Updated README's Results section, which had drifted
+slightly out of date (9389/9387 vs the current 9388/9386 - the 1-count shift
+from the Transaction Release Date fix a few commits back had not been
+reflected there).

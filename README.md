@@ -226,10 +226,13 @@ the data sizes this project actually has to handle.
 ## Results
 
 Reconciliation scope = settlement `12395580393` (the only settlement in the file),
-Released payments. Before fix: `reconciled = 13289`, `unreconciled_payment = 9389`
-(other settlements + deferred), `unreconciled_settlement = 0`. After fix,
-`unreconciled_payment = 9387` (Defect 5 below collapses two fragmented rows into
-one each; the Summary total is unaffected either way, see below).
+Released payments. **Final run**: `reconciled = 13289`, `unreconciled_payment = 9386`
+(other settlements + deferred payments - expected, not an error, see
+Assumption 8), `unreconciled_settlement = 0`. Before the config fixes:
+`reconciled = 13289`, `unreconciled_payment = 9388`, `unreconciled_settlement
+= 0` (the difference from 9386 is Defect 5 below collapsing two fragmented
+rows into one each - a Consolidated Data display fix with no Summary-total
+effect, not a reconciliation-count fix).
 
 ### Before fix — Summary mismatches
 | section | line | Payments | Settlements | diff |
